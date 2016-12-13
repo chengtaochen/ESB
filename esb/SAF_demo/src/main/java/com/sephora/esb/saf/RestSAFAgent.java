@@ -19,7 +19,7 @@ public class RestSAFAgent extends SAFAgent {
 	}
 	
 	@Override
-	public void send(byte[] data) throws Exception {
+	public void send(byte[] data, String uuid) throws Exception {
 		System.out.println("Calling RestSAFAgent.send()...");
 		// 1. Check remote server status
 		// 2. Based on response from remote server, either send the data
@@ -28,7 +28,7 @@ public class RestSAFAgent extends SAFAgent {
 			if (this.check_connection(this.remoteContext) == false) {
 				// Store data locally
 				System.err.println("Remote server is down, putting data into persist storage...");
-				this.persistData(data);
+				this.persistData(data, uuid);
 			}
 			else {
 				System.out.println("Remote server is up, sending data to remote destination...");

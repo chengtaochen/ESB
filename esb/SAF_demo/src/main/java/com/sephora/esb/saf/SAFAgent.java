@@ -9,9 +9,13 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.Writer;
 import java.nio.channels.FileChannel;
+import java.util.Calendar;
 import java.util.Iterator;
 import java.util.Queue;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -20,11 +24,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 
 abstract class SAFAgent {
-	//private static final int PERSIST_STORAGE_TASK_THREAD_COUNT = 1;
+	// private static final int PERSIST_STORAGE_TASK_THREAD_COUNT = 1;
 	private static final int AGENT_TASK_THREAD_COUNT = 1;
 	private static final String PERSIST_STORAGE_PATH = "/tmp/SAF_data.txt";
-	private long ttl = -1;
-	private int max_retries = -1;
+	// private long ttl = 172800; //48 hours in seconds
+	private long ttl = 10;
+	private int max_retries = 1000;
 	private int max_queue_size = 10;
 	private int retries_interval = 5000; // ms
 	private ExecutorService executor;
@@ -32,11 +37,22 @@ abstract class SAFAgent {
 	private BufferedWriter bufferedWriter = null;
 	private BufferedReader bufferReader = null;
 
-	Queue<byte[]> persistQueue = new ConcurrentLinkedQueue<byte[]>();
+	Queue<String> persistQueue = new ConcurrentLinkedQueue<String>();
+	ConcurrentMap<String, RetryEntry> retryMap = new ConcurrentHashMap<String, RetryEntry>();
 	private File persistStorage = null;
 	private final ReentrantLock persistStoragelock = new ReentrantLock();
 
 	public SAFAgent() throws IOException {
+		this.init();
+	}
+
+	public SAFAgent(long ttl, int max_retries) throws IOException {
+		 this.ttl = ttl;
+		 this.max_retries = max_retries;
+		 this.init();
+	}
+	
+	private void init() throws IOException {
 		this.executor = Executors.newFixedThreadPool(1 + AGENT_TASK_THREAD_COUNT);
 		// this.executor = Executors.newScheduledThreadPool(THREAD_COUNT);
 		this.startSAFAgent();
@@ -50,8 +66,8 @@ abstract class SAFAgent {
 		// this.bufferReader = new BufferedReader( new
 		// FileReader(PERSIST_STORAGE_PATH));
 	}
-
-	abstract public void send(byte[] data) throws Exception;
+	
+	abstract public void send(byte[] data, String uuid) throws Exception;
 
 	public void shutDown() {
 		try {
@@ -101,10 +117,18 @@ abstract class SAFAgent {
 		this.retries_interval = retries_interval;
 	}
 
-	void persistData(byte[] data) {
+	void persistData(byte[] data, String uuid) {
 		try {
+			StringBuffer stb = null;
+			if (uuid == null) {
+				// Generate a UUID first, then append the actual data
+				uuid = UUID.randomUUID().toString();
+			}
+			stb = new StringBuffer();
+			stb.append(uuid).append("|").append(new String(data));
+			
 			this.persistStoragelock.lock();
-			this.bufferedWriter.write(new String(data));
+			this.bufferedWriter.write(stb.toString());
 			this.bufferedWriter.write("\n");
 		} catch (IOException e) {
 			e.printStackTrace();
@@ -132,6 +156,38 @@ abstract class SAFAgent {
 		}
 	}
 
+	private boolean canRetry(String uuid) {
+		boolean ret = true;
+		long currentTime = Calendar.getInstance().getTimeInMillis();
+
+		if (this.retryMap.containsKey(uuid) == true) {
+			System.out.println("Found existing RetryEntry with uuid=" + uuid);
+			RetryEntry retryEntry = retryMap.get(uuid);
+			int rCount = retryEntry.getRetryCount();
+			long lastReTry = retryEntry.getLastRetry();
+			if (rCount > this.max_retries) {
+				ret = false;
+				System.out.println("In canRetry(), data with uuid=" + uuid + " and current retryCount=" + rCount
+						+ " has reached max retry: " + this.max_retries);
+			} else if ((currentTime - lastReTry) / 1000 > this.ttl) {
+				ret = false;
+				System.out.println("In canRetry(), data with uuid=" + uuid + " and last reTry=" + lastReTry
+						+ " has exceeded TTL (sec): " + this.ttl);
+			} else {
+				retryEntry.setLastRetry(currentTime);
+				retryEntry.setRetryCount(rCount++);
+			}
+		} else {
+			System.out.println("New RetryEntry with uuid=" + uuid);
+			RetryEntry retryEntry = new RetryEntry();
+			retryEntry.setRetryCount(1);
+			retryEntry.setLastRetry(currentTime);
+			this.retryMap.put(uuid, retryEntry);
+		}
+
+		return ret;
+	}
+
 	class AgentTask implements Runnable {
 		private int thread_num = -1;
 
@@ -141,19 +197,29 @@ abstract class SAFAgent {
 		}
 
 		public void run() {
-			Iterator<byte[]> it = null;
-			byte[] data = null;
+			String uuid = null;
+			String data = null;
 			while (true) {
 				System.out.println("AgentTask " + this.thread_num + " checking persist queue");
 				try {
 					data = persistQueue.poll();
-					if(data!=null) {
-						send(data);
+					if (data != null) {
+						// Strip out the uid first
+						String[] tempSplittedArray = data.split("\\|");
+						uuid = tempSplittedArray[0];
+						data = tempSplittedArray[1];
+						System.out.println("AgentTask got a client request data with uuid=" + uuid + ", and data=" + data);
+						// check ttl and max_retry
+						if (canRetry(uuid) == true) {
+							send(data.getBytes(), uuid);
+						} else {
+							System.out.println("client data with uuid="+uuid+" either reached ttl or max retry.");
+						}
 					}
 				} catch (Exception e) {
 					System.err.println("In AgentTask, exception occured while sending data...");
 					e.printStackTrace();
-					persistData(data);
+					persistData(data.getBytes(), uuid);
 				}
 
 				try {
@@ -180,8 +246,6 @@ abstract class SAFAgent {
 				while (true) {
 					Thread.sleep(5000);
 					System.out.println("PersistStorageTask " + this.thread_num + " checking persist storage");
-					// byte[] data = persistQueue.poll();
-					byte[] data = null;
 					int lineCount = 0;
 					String strLine = "";
 					if (bufferReader == null) {
@@ -190,16 +254,11 @@ abstract class SAFAgent {
 					persistStoragelock.lock();
 					while ((strLine = bufferReader.readLine()) != null && lineCount <= max_queue_size) {
 						System.out.println("PersistStorageTask read one line from persist storage:" + strLine);
-						data = strLine.getBytes();
-						if (data != null) {
-							System.out.println("Got data from persist storage, sending it out now...");
-							persistQueue.add(data);
-						} else {
-							System.out.println("No data available in persist storage...");
-						}
+						System.out.println("Got data from persist storage, push it to persist queue now...");
+						persistQueue.add(strLine);
 						lineCount++;
 					}
-					if (lineCount!=0 && lineCount < max_queue_size) {
+					if (lineCount != 0 && lineCount < max_queue_size) {
 						System.out.println("No more data available in persist storage...");
 						// EOF encounter in persist storage file
 						// Truncate file and re-assign all file reference
@@ -221,6 +280,29 @@ abstract class SAFAgent {
 				e.printStackTrace();
 			}
 		}
+	}
+
+	class RetryEntry {
+
+		private int retryCount;
+		private long lastRetry;
+
+		public int getRetryCount() {
+			return retryCount;
+		}
+
+		public void setRetryCount(int retryCount) {
+			this.retryCount = retryCount;
+		}
+
+		public long getLastRetry() {
+			return lastRetry;
+		}
+
+		public void setLastRetry(long lastRetry) {
+			this.lastRetry = lastRetry;
+		}
+
 	}
 
 }
