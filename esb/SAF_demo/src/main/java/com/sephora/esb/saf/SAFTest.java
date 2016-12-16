@@ -15,7 +15,7 @@ public class SAFTest {
 			String data = "this is test message ";
 			int count = 1;
 			while (true) {
-				safAgent.send((data+String.valueOf(count)).getBytes(), null);
+				safAgent.sendRequest((data+String.valueOf(count)).getBytes());
 				count++;
 				Thread.sleep(9000);
 			}
