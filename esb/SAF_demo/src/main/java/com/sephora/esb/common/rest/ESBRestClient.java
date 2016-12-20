@@ -6,6 +6,9 @@ import javax.ws.rs.client.Entity;
 import javax.ws.rs.client.WebTarget;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 
 public class ESBRestClient {
    
@@ -13,6 +16,7 @@ public class ESBRestClient {
    private String server_port;
    private String server_protocol;
    private String resource_path;
+   Logger logger = LoggerFactory.getLogger(ESBRestClient.class);
    
    public ESBRestClient(String server_protocol, String server_host, String server_port, String resource_path) {
 	   this.server_protocol = server_protocol;
@@ -30,8 +34,8 @@ public class ESBRestClient {
 	   
 	   int status = response.getStatus();
 	   String responseBody = response.readEntity(String.class);
-	   System.out.println("In ESBRestClient.sendPostRequest(), getting status code=" + status);
-	   System.out.println("In ESBRestClient.sendPostRequest(), getting response body: " + responseBody);
+	   logger.debug("In ESBRestClient.sendPostRequest(), getting status code=" + status);
+	   logger.debug("In ESBRestClient.sendPostRequest(), getting response body: " + responseBody);
 	   //need to call close if we do not read/process the response entity
 	   response.close();
 	   

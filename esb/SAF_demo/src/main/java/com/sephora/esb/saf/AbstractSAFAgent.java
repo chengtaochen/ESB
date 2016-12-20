@@ -1,7 +1,6 @@
 package com.sephora.esb.saf;
 
 import java.io.EOFException;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.channels.FileChannel;
@@ -13,6 +12,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /*
  * persist binary record format
@@ -41,7 +42,9 @@ abstract class AbstractSAFAgent implements SAFAgent {
 	private RandomAccessFile persistStorageReader = null;
 	Queue<RequestEntry> persistQueue = new ConcurrentLinkedQueue<RequestEntry>();
 	private final ReentrantLock persistStoragelock = new ReentrantLock();
-
+ 
+	Logger logger = LoggerFactory.getLogger(AbstractSAFAgent.class);
+	
 	public AbstractSAFAgent() throws IOException {
 		this.init();
 	}
@@ -57,22 +60,23 @@ abstract class AbstractSAFAgent implements SAFAgent {
 		// this.executor = Executors.newScheduledThreadPool(THREAD_COUNT);
 		this.startSAFAgent();
 		this.persistStorageWriter = new RandomAccessFile(PERSIST_STORAGE_PATH, "rwd");
-		this.persistStorageReader = new RandomAccessFile(PERSIST_STORAGE_PATH, "r");
+		//this.persistStorageReader = new RandomAccessFile(PERSIST_STORAGE_PATH, "r");
+		this.persistStorageReader = new RandomAccessFile(PERSIST_STORAGE_PATH, "rwd");
 	}
 
 	public void shutDown() {
 		try {
-			System.out.println("attempt to shutdown executor");
+			logger.info("attempt to shutdown executor");
 			this.executor.shutdown();
 			this.executor.awaitTermination(5, TimeUnit.SECONDS);
 		} catch (InterruptedException e) {
-			System.err.println("tasks interrupted");
+			logger.error("tasks interrupted");
 		} finally {
 			if (!this.executor.isTerminated()) {
-				System.err.println("cancel non-finished tasks");
+				logger.error("cancel non-finished tasks");
 			}
 			this.executor.shutdownNow();
-			System.out.println("shutdown finished");
+			logger.info("shutdown finished");
 		}
 	}
 
@@ -85,16 +89,16 @@ abstract class AbstractSAFAgent implements SAFAgent {
 		RequestEntry requestEntry = new RequestEntry(UUID.randomUUID().toString(), data, 0,
 				Calendar.getInstance().getTimeInMillis(), false);
 		if (this.check_connection() == false) {
-			System.err.println(
+			logger.error(
 					"In AbstractSAFAgent.sendRequest(), remote server is down, putting data into persist storage...");
 			this.persistData(requestEntry);
 		} else {
 			try {
 				this.send(requestEntry.getData());
 			} catch (Exception e) {
-				System.err.println(
-						"In AbstractSAFAgent.sendRequest(), exception occured while sending request to remote destionation, putting data into persist storage...");
-				e.printStackTrace();
+				logger.error(
+						"In AbstractSAFAgent.sendRequest(), exception occured while sending request to remote destionation, putting data into persist storage...", e);
+				//e.printStackTrace();
 				this.persistData(requestEntry);
 			}
 		}
@@ -142,7 +146,7 @@ abstract class AbstractSAFAgent implements SAFAgent {
 
 	void persistData(RequestEntry requestEntry) {
 		try {
-			System.out.println("In AbstractSAFAgent.persistData(), uuid=" + requestEntry.getUuid());
+			logger.debug("In AbstractSAFAgent.persistData(), uuid=" + requestEntry.getUuid());
 			this.persistStoragelock.lock();
 			this.persistStorageWriter.writeBoolean(requestEntry.isProcessed());
 			this.persistStorageWriter.writeBytes(requestEntry.getUuid());
@@ -151,9 +155,11 @@ abstract class AbstractSAFAgent implements SAFAgent {
 			this.persistStorageWriter.writeInt(requestEntry.getData().length);
 			this.persistStorageWriter.write(requestEntry.getData());
 		} catch (IOException e) {
-			e.printStackTrace();
+			logger.error("IOException occured...", e);
+			//e.printStackTrace();
 		} catch (Exception exp) {
-			exp.printStackTrace();
+			logger.error("Exception occured...", exp);
+			//exp.printStackTrace();
 		} finally {
 			this.persistStoragelock.unlock();
 		}
@@ -179,11 +185,11 @@ abstract class AbstractSAFAgent implements SAFAgent {
 
 		if (rCount > this.max_retries) {
 			ret = false;
-			System.out.println("In canRetry(), data with uuid=" + requestEntry.getUuid() + " and current retryCount="
+			logger.info("In canRetry(), data with uuid=" + requestEntry.getUuid() + " and current retryCount="
 					+ rCount + " has reached max retry: " + this.max_retries);
 		} else if ((currentTime - createdTime) / 1000 > this.ttl) {
 			ret = false;
-			System.out.println("In canRetry(), data with uuid=" + requestEntry.getUuid() + " and created time="
+			logger.info("In canRetry(), data with uuid=" + requestEntry.getUuid() + " and created time="
 					+ createdTime + " has exceeded TTL (sec): " + this.ttl);
 		} else {
 			requestEntry.setRetryCount(++rCount);
@@ -197,37 +203,34 @@ abstract class AbstractSAFAgent implements SAFAgent {
 
 		public AgentTask(int num) {
 			this.thread_num = num;
-			System.out.println("Start new AgentTask thread number:" + this.thread_num);
+			logger.info("Start new AgentTask thread number:" + this.thread_num);
 		}
 
 		public void run() {
 			RequestEntry requestEntry = null;
 			while (true) {
-				System.out.println("AgentTask " + this.thread_num + " checking persist queue");
+				logger.debug("AgentTask " + this.thread_num + " checking persist queue");
 				try {
 					requestEntry = persistQueue.poll();
 					if (requestEntry != null) {
-						System.out.println("AgentTask got a client request entry=" + requestEntry);
+						logger.debug("AgentTask got a client request entry={}" + requestEntry);
 						// check ttl and max_retry
 						if (canRetry(requestEntry) == true) {
-							System.out.println("In AgentTask.run(), after calling canRetry(), requestEntry="+requestEntry);
+							logger.debug("In AgentTask.run(), after calling canRetry(), requestEntry={}"+requestEntry);
 							send(requestEntry.getData());
 						} else {
-							System.out.println("###############################################################################");
-							System.out.println("client data with uuid=" + requestEntry.getUuid() + " either reached ttl or max retry.");
+							logger.debug("client data with uuid=" + requestEntry.getUuid() + " either reached ttl or max retry.");
 						}
 					}
 				} catch (Exception e) {
-					System.err.println("In AgentTask, exception occured while sending data...");
-					e.printStackTrace();
+					logger.error("In AgentTask, exception occured while sending data...", e);
 					persistData(requestEntry);
 				}
 
 				try {
 					Thread.sleep(retries_interval);
 				} catch (InterruptedException e) {
-					// TODO Auto-generated catch block
-					e.printStackTrace();
+					logger.error("InterruptedException occrued...", e);
 				}
 			}
 		}
@@ -239,51 +242,72 @@ abstract class AbstractSAFAgent implements SAFAgent {
 
 		public PersistStorageTask(int num) {
 			this.thread_num = num;
-			System.out.println("Start new PersistStorageTask thread number:" + this.thread_num);
+			logger.info("Start new PersistStorageTask thread number:" + this.thread_num);
 		}
 
 		public void run() {
 			try {
 				while (true) {
 					Thread.sleep(5000);
-					System.out.println("PersistStorageTask " + this.thread_num + " checking persist storage");
+					logger.debug("PersistStorageTask " + this.thread_num + " checking persist storage");
 					int recordCount = 0;
 					boolean isEOF = false;
 					
 					persistStoragelock.lock();
 					while (true && recordCount <= max_queue_size) {
 						try {
-							System.out.println("PersistStorageTask reading data from persist storage file...");
+							logger.debug("PersistStorageTask reading data from persist storage file...");
+							//Save current offset so we
+							//can update the processFlag
+							long currentRecordStartOffset = persistStorageReader.getFilePointer();
 							boolean processFlag = persistStorageReader.readBoolean();
-							System.out.println("processFlag=" + String.valueOf(processFlag));
+							logger.debug("processFlag=" + String.valueOf(processFlag));
+							if(processFlag==true) {
+								continue;
+							}
 							byte[] uuidVal = new byte[36];
 							persistStorageReader.readFully(uuidVal);
-							System.out.println("uuidVal=" + new String(uuidVal));
+							logger.debug("uuidVal=" + new String(uuidVal));
 							int retryCount = persistStorageReader.readInt();
-							System.out.println("retryCount=" + String.valueOf(retryCount));
+							logger.debug("retryCount=" + String.valueOf(retryCount));
 							long lastRetry = persistStorageReader.readLong();
-							System.out.println("lastRetry=" + String.valueOf(lastRetry));
+							logger.debug("lastRetry=" + String.valueOf(lastRetry));
 							int offset = persistStorageReader.readInt();
-							System.out.println("offset=" + String.valueOf(offset));
+							logger.debug("offset=" + String.valueOf(offset));
 							byte[] data = new byte[offset];
 							persistStorageReader.readFully(data);
-							System.out.println("data=" + new String(data));
+							logger.debug("data=" + new String(data));
+							//Save next record starting offset
+							//so we can reset the persistStorageReader pointer
+							//to the correct start position of next record after setting current record
+							//processFlag
+							long nextRecordOffset = persistStorageReader.getFilePointer();
+							
 							RequestEntry requestEntry = new RequestEntry(new String(uuidVal), data, retryCount,
 									lastRetry, processFlag);
-							System.out.println(
-									"PersistStorageTask read one requestEntry from persist storage:" + requestEntry);
-							System.out.println("Got data from persist storage, push it to persist queue now...");
+							logger.debug(
+									"PersistStorageTask read one requestEntry from persist storage:{}" + requestEntry);
+							logger.debug("Got data from persist storage, push it to persist queue now...");
 							persistQueue.add(requestEntry);
 							recordCount++;
+							//Update processFlag to true
+							persistStorageReader.seek(currentRecordStartOffset);
+							persistStorageReader.writeBoolean(true);
+							//Reset the persistStorageReader pointer
+							//to the correct start position of next record
+							persistStorageReader.seek(nextRecordOffset);
+							
 						} catch (EOFException eof) {
-							System.out.println("Reached end of persist storage file!!!");
+							logger.error("Reached end of persist storage file!!!");
 							isEOF = true;
 							break;
+						} catch (Exception e) {
+							logger.error("Exception occured...", e);
 						}
 					}
 
 					if (recordCount != 0 && isEOF == true) {
-						System.out.println("No more data available in persist storage...");
+						logger.debug("No more data available in persist storage...");
 						// EOF encounter in persist storage file
 						// Truncate file and re-assign all file reference
 						persistStorageReader.close();
@@ -294,13 +318,15 @@ abstract class AbstractSAFAgent implements SAFAgent {
 						persistStorageWriter.close();
 						persistStorageWriter = null;
 						persistStorageWriter = new RandomAccessFile(PERSIST_STORAGE_PATH, "rwd");
-						persistStorageReader = new RandomAccessFile(PERSIST_STORAGE_PATH, "r");
+						//persistStorageReader = new RandomAccessFile(PERSIST_STORAGE_PATH, "r");
+						persistStorageReader = new RandomAccessFile(PERSIST_STORAGE_PATH, "rwd");
 					}
 
 					persistStoragelock.unlock();
 				}
 			} catch (Exception e) {
-				e.printStackTrace();
+				logger.error("Exception occured...", e);
+				//e.printStackTrace();
 			}
 		}
 	}
